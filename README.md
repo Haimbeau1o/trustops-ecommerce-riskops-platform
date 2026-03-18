@@ -89,26 +89,47 @@ trustops-ecommerce-riskops-platform/
 
 ## 当前状态
 
-当前已经升级为可运行的第一版后端骨架：
-- Go Hertz gateway：`GET /healthz`、`POST /api/v1/risk/events/ingest`、`GET /api/v1/risk/cases/:case_id`
-- Python FastAPI copilot：`GET /healthz`、`POST /copilot/risk/summary`
-- `docker-compose` 一键拉起 `mysql`、`redis`、`rabbitmq`、`gateway`、`copilot`
+当前为 phase-2 运行时骨架（可演示后端平台主链路）：
+- Go Hertz gateway（env 驱动配置）
+  - `GET /healthz`
+  - `POST /api/v1/risk/events/ingest`
+  - `GET /api/v1/risk/cases/:case_id`
+- 风险案例仓储抽象
+  - `MySQL` 持久化
+  - `Redis` 案件查询缓存
+  - `In-memory` 测试/兜底实现
+- 异步事件
+  - ingest 后发布 lightweight case event 到 `RabbitMQ`
+  - `services/worker` 消费队列并执行消息处理
+- Python FastAPI copilot（AI 增强，不替代主流程）
+  - `GET /healthz`
+  - `POST /copilot/risk/summary`
 
 ## 本地运行
 
-### 1) 运行测试
+### 1) 环境变量
+
+```bash
+cp .env.example .env
+```
+
+`.env.example` 记录了 demo 所需变量，默认值可直接用于 `docker compose` 本地运行。
+
+### 2) 运行测试（不依赖外部中间件）
 
 ```bash
 cd services/gateway-go && go test ./...
 cd ../ai-copilot && python3 -m pip install --user -r requirements-dev.txt && python3 -m pytest -q
+cd ../worker && go test ./...
 ```
 
-### 2) 单独启动服务
+### 3) 单独启动服务
 
 Gateway:
 
 ```bash
 cd services/gateway-go
+go mod download
 go run ./cmd/server
 ```
 
@@ -120,11 +141,22 @@ python3 -m pip install --user -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 3) 使用 Docker Compose 启动全栈依赖
+Worker:
+
+```bash
+cd services/worker
+go mod download
+go run ./cmd/worker
+```
+
+### 4) 使用 Docker Compose 启动全栈
 
 ```bash
 docker compose up --build
 ```
+
+Compose 会启动 `mysql`、`redis`、`rabbitmq`、`gateway`、`worker`、`copilot`，并自动加载 `infra/mysql/init/001_init.sql` 初始化表结构。
+同时会为 MySQL / Redis / RabbitMQ 启用健康检查，Gateway 在 `mysql` 或 `rabbitmq` 不可用时直接启动失败，避免落入“假成功”的内存 / noop 主链路。
 
 ## API 快速示例
 
@@ -155,3 +187,14 @@ curl -X POST http://127.0.0.1:8000/copilot/risk/summary \
   -H "Content-Type: application/json" \
   -d '{"case_id":"case-risk-001","merchant_id":"merchant-1001","risk_category":"listing_fraud","evidence_items":["sku_spike","ip_anomaly"],"operator_note":"need triage"}'
 ```
+
+也可以直接运行脚本：
+
+```bash
+./scripts/sample_requests.sh
+```
+
+## 依赖说明
+
+- `services/ai-copilot/requirements.txt`：运行时依赖
+- `services/ai-copilot/requirements-dev.txt`：测试依赖

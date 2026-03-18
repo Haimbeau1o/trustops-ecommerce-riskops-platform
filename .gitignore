@@ -25,6 +25,7 @@ logs/
 # Env
 .env
 .env.*
+!.env.example
 
 # Build / temp
 dist/

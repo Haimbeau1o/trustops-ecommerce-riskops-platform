@@ -2,46 +2,104 @@ services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: trustops
-      MYSQL_USER: trustops
-      MYSQL_PASSWORD: trustops
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-trustops}
+      MYSQL_USER: ${MYSQL_USER:-trustops}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-trustops}
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./infra/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   redis:
     image: redis:7.4-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
   rabbitmq:
     image: rabbitmq:3.13-management
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-trustops}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-trustops}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   copilot:
     build:
       context: ./services/ai-copilot
+    restart: unless-stopped
     ports:
       - "8000:8000"
     depends_on:
-      - mysql
-      - redis
-      - rabbitmq
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   gateway:
     build:
       context: ./services/gateway-go
+    restart: unless-stopped
+    environment:
+      GATEWAY_HTTP_HOST: ${GATEWAY_HTTP_HOST:-0.0.0.0}
+      GATEWAY_HTTP_PORT: ${GATEWAY_HTTP_PORT:-8080}
+      GATEWAY_STORAGE_BACKEND: ${GATEWAY_STORAGE_BACKEND:-mysql}
+      GATEWAY_MYSQL_DSN: ${GATEWAY_MYSQL_DSN:-trustops:trustops@tcp(mysql:3306)/trustops?parseTime=true}
+      GATEWAY_REDIS_ADDR: ${GATEWAY_REDIS_ADDR:-redis:6379}
+      GATEWAY_REDIS_PASSWORD: ${GATEWAY_REDIS_PASSWORD:-}
+      GATEWAY_REDIS_DB: ${GATEWAY_REDIS_DB:-0}
+      GATEWAY_CASE_CACHE_TTL_SECONDS: ${GATEWAY_CASE_CACHE_TTL_SECONDS:-300}
+      GATEWAY_MQ_BACKEND: ${GATEWAY_MQ_BACKEND:-rabbitmq}
+      GATEWAY_RABBITMQ_URL: ${GATEWAY_RABBITMQ_URL:-amqp://trustops:trustops@rabbitmq:5672/}
+      GATEWAY_RABBITMQ_QUEUE: ${GATEWAY_RABBITMQ_QUEUE:-risk.case.ingested}
     ports:
       - "8080:8080"
     depends_on:
-      - mysql
-      - redis
-      - rabbitmq
-      - copilot
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      copilot:
+        condition: service_started
+
+  worker:
+    build:
+      context: ./services/worker
+    restart: unless-stopped
+    environment:
+      WORKER_NAME: ${WORKER_NAME:-riskops-worker}
+      WORKER_RABBITMQ_URL: ${WORKER_RABBITMQ_URL:-amqp://trustops:trustops@rabbitmq:5672/}
+      WORKER_RABBITMQ_QUEUE: ${WORKER_RABBITMQ_QUEUE:-risk.case.ingested}
+      WORKER_PREFETCH: ${WORKER_PREFETCH:-10}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      gateway:
+        condition: service_started
 
 volumes:
   mysql_data:
