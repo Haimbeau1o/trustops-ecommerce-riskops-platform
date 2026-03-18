@@ -89,4 +89,69 @@ trustops-ecommerce-riskops-platform/
 
 ## 当前状态
 
-当前为本地内容骨架版本（不含远程仓库配置和业务代码实现），用于后续逐步落地服务代码与演示链路。
+当前已经升级为可运行的第一版后端骨架：
+- Go Hertz gateway：`GET /healthz`、`POST /api/v1/risk/events/ingest`、`GET /api/v1/risk/cases/:case_id`
+- Python FastAPI copilot：`GET /healthz`、`POST /copilot/risk/summary`
+- `docker-compose` 一键拉起 `mysql`、`redis`、`rabbitmq`、`gateway`、`copilot`
+
+## 本地运行
+
+### 1) 运行测试
+
+```bash
+cd services/gateway-go && go test ./...
+cd ../ai-copilot && python3 -m pytest -q
+```
+
+### 2) 单独启动服务
+
+Gateway:
+
+```bash
+cd services/gateway-go
+go run ./cmd/server
+```
+
+Copilot:
+
+```bash
+cd services/ai-copilot
+python3 -m pip install --user -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+### 3) 使用 Docker Compose 启动全栈依赖
+
+```bash
+docker compose up --build
+```
+
+## API 快速示例
+
+Gateway health:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+```
+
+风险事件接入：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/risk/events/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"merchant_id":"merchant-1001","event_type":"abnormal_listing_activity","evidence":["sku_spike","ip_anomaly"],"risk_score":0.87}'
+```
+
+风险案例查询：
+
+```bash
+curl http://127.0.0.1:8080/api/v1/risk/cases/case-risk-001
+```
+
+Copilot 风险摘要：
+
+```bash
+curl -X POST http://127.0.0.1:8000/copilot/risk/summary \
+  -H "Content-Type: application/json" \
+  -d '{"case_id":"case-risk-001","merchant_id":"merchant-1001","risk_category":"listing_fraud","evidence_items":["sku_spike","ip_anomaly"],"operator_note":"need triage"}'
+```

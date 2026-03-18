@@ -1,0 +1,47 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: trustops
+      MYSQL_USER: trustops
+      MYSQL_PASSWORD: trustops
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  copilot:
+    build:
+      context: ./services/ai-copilot
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+      - redis
+      - rabbitmq
+
+  gateway:
+    build:
+      context: ./services/gateway-go
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mysql
+      - redis
+      - rabbitmq
+      - copilot
+
+volumes:
+  mysql_data:
