@@ -40,8 +40,10 @@ func (s *InMemoryProcessedEventStore) TryStart(_ context.Context, eventID, caseI
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.items[eventID]; exists {
-		return false, nil
+	if existing, exists := s.items[eventID]; exists {
+		if existing.Status != "failed" {
+			return false, nil
+		}
 	}
 	s.items[eventID] = ProcessedEventRecord{
 		EventID:      eventID,
@@ -86,7 +88,13 @@ func NewMySQLProcessedEventStore(db *sql.DB) *MySQLProcessedEventStore {
 func (s *MySQLProcessedEventStore) TryStart(ctx context.Context, eventID, caseID, consumerName string) (bool, error) {
 	result, err := s.db.ExecContext(
 		ctx,
-		"INSERT INTO risk_worker_processed_events (event_id, case_id, status, consumer_name) VALUES (?, ?, 'processing', ?) ON DUPLICATE KEY UPDATE event_id = event_id",
+		`INSERT INTO risk_worker_processed_events (event_id, case_id, status, consumer_name)
+		VALUES (?, ?, 'processing', ?)
+		ON DUPLICATE KEY UPDATE
+			status = IF(status = 'failed', 'processing', status),
+			consumer_name = IF(status = 'failed', VALUES(consumer_name), consumer_name),
+			last_error = IF(status = 'failed', '', last_error),
+			processed_at = IF(status = 'failed', NULL, processed_at)`,
 		eventID,
 		caseID,
 		consumerName,
@@ -98,7 +106,7 @@ func (s *MySQLProcessedEventStore) TryStart(ctx context.Context, eventID, caseID
 	if err != nil {
 		return false, err
 	}
-	return rows == 1, nil
+	return rows > 0, nil
 }
 
 func (s *MySQLProcessedEventStore) MarkProcessed(ctx context.Context, eventID string) error {

@@ -64,6 +64,17 @@ func NewRabbitMQPublisherFromChannel(channel amqpChannel, queue string) (*Rabbit
 		false,
 		false,
 		false,
+		queueDeclarationArgs(queue),
+	)
+	if err != nil {
+		return nil, err
+	}
+	_, err = channel.QueueDeclare(
+		deadLetterQueueName(queue),
+		true,
+		false,
+		false,
+		false,
 		nil,
 	)
 	if err != nil {
@@ -73,6 +84,17 @@ func NewRabbitMQPublisherFromChannel(channel amqpChannel, queue string) (*Rabbit
 		channel: channel,
 		queue:   queue,
 	}, nil
+}
+
+func deadLetterQueueName(queue string) string {
+	return queue + ".dlq"
+}
+
+func queueDeclarationArgs(queue string) amqp.Table {
+	return amqp.Table{
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": deadLetterQueueName(queue),
+	}
 }
 
 func (p *RabbitMQPublisher) PublishCaseIngested(ctx context.Context, event CaseIngestedEvent) error {

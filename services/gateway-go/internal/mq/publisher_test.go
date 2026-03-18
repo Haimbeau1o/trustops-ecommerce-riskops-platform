@@ -10,8 +10,12 @@ import (
 
 type fakeAMQPChannel struct {
 	declaredQueue string
-	published     []amqp.Publishing
-	routingKeys   []string
+	declareCalls  []struct {
+		name string
+		args amqp.Table
+	}
+	published   []amqp.Publishing
+	routingKeys []string
 }
 
 func (f *fakeAMQPChannel) QueueDeclare(
@@ -20,9 +24,13 @@ func (f *fakeAMQPChannel) QueueDeclare(
 	_ bool,
 	_ bool,
 	_ bool,
-	_ amqp.Table,
+	args amqp.Table,
 ) (amqp.Queue, error) {
 	f.declaredQueue = name
+	f.declareCalls = append(f.declareCalls, struct {
+		name string
+		args amqp.Table
+	}{name: name, args: args})
 	return amqp.Queue{Name: name}, nil
 }
 
@@ -70,8 +78,17 @@ func TestRabbitMQPublisherPublishesCaseEvent(t *testing.T) {
 		t.Fatalf("publish failed: %v", err)
 	}
 
-	if ch.declaredQueue != "risk.case.ingested" {
-		t.Fatalf("expected queue to be declared, got %q", ch.declaredQueue)
+	if len(ch.declareCalls) != 2 {
+		t.Fatalf("expected main queue and dlq declarations, got %d", len(ch.declareCalls))
+	}
+	if ch.declareCalls[0].name != "risk.case.ingested" {
+		t.Fatalf("expected main queue declaration first, got %#v", ch.declareCalls[0])
+	}
+	if ch.declareCalls[0].args["x-dead-letter-routing-key"] != "risk.case.ingested.dlq" {
+		t.Fatalf("expected main queue dead-letter routing key, got %#v", ch.declareCalls[0].args)
+	}
+	if ch.declareCalls[1].name != "risk.case.ingested.dlq" {
+		t.Fatalf("expected dlq declaration, got %#v", ch.declareCalls[1])
 	}
 	if len(ch.published) != 1 {
 		t.Fatalf("expected one message to be published, got %d", len(ch.published))

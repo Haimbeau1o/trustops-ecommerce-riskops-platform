@@ -416,6 +416,68 @@ func TestIngestRiskEventRouteRateLimited(t *testing.T) {
 	}
 }
 
+func TestInvalidAPIKeyTrafficIsRateLimited(t *testing.T) {
+	app := NewRouter(Dependencies{
+		Repository:    &fakeRepository{},
+		Authenticator: NewAPIKeyAuthenticator([]string{"ops-key"}),
+		RateLimiter:   NewInMemoryRateLimiter(1),
+		Clock: func() time.Time {
+			return time.Unix(1_710_000_000, 0)
+		},
+	})
+	payload := `{"merchant_id":"merchant-1001","event_type":"abnormal_listing_activity","evidence":["sku_spike"],"risk_score":0.87}`
+
+	first := ut.PerformRequest(
+		app.Engine,
+		"POST",
+		"/api/v1/risk/events/ingest",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "X-API-Key", Value: "bad-key"},
+		ut.Header{Key: "Content-Type", Value: "application/json"},
+	)
+	if first.Code != 403 {
+		t.Fatalf("expected first request status 403, got %d", first.Code)
+	}
+
+	second := ut.PerformRequest(
+		app.Engine,
+		"POST",
+		"/api/v1/risk/events/ingest",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "X-API-Key", Value: "bad-key"},
+		ut.Header{Key: "Content-Type", Value: "application/json"},
+	)
+	if second.Code != 429 {
+		t.Fatalf("expected second request status 429, got %d", second.Code)
+	}
+}
+
+func TestCaseReadRoutesShareRateLimitBucketAcrossCaseIDs(t *testing.T) {
+	app := NewRouter(Dependencies{
+		Repository: &fakeRepository{
+			cases: map[string]storage.Case{
+				"case-risk-001": {CaseID: "case-risk-001", MerchantID: "merchant-1001", EventType: "listing_fraud", RiskCategory: "listing_fraud", CaseStatus: "pending_review", EvidenceItems: []string{"sku_spike"}},
+				"case-risk-002": {CaseID: "case-risk-002", MerchantID: "merchant-1002", EventType: "listing_fraud", RiskCategory: "listing_fraud", CaseStatus: "pending_review", EvidenceItems: []string{"ip_anomaly"}},
+			},
+		},
+		Authenticator: NewAPIKeyAuthenticator([]string{"ops-key"}),
+		RateLimiter:   NewInMemoryRateLimiter(1),
+		Clock: func() time.Time {
+			return time.Unix(1_710_000_000, 0)
+		},
+	})
+
+	first := ut.PerformRequest(app.Engine, "GET", "/api/v1/risk/cases/case-risk-001", nil, ut.Header{Key: "X-API-Key", Value: "ops-key"})
+	if first.Code != 200 {
+		t.Fatalf("expected first request status 200, got %d", first.Code)
+	}
+
+	second := ut.PerformRequest(app.Engine, "GET", "/api/v1/risk/cases/case-risk-002", nil, ut.Header{Key: "X-API-Key", Value: "ops-key"})
+	if second.Code != 429 {
+		t.Fatalf("expected second request status 429, got %d", second.Code)
+	}
+}
+
 func TestGetAuditLogsRoute(t *testing.T) {
 	app := NewRouter(Dependencies{
 		Repository: &fakeRepository{

@@ -45,6 +45,30 @@ func TestInMemoryProcessedEventStoreMarksProcessed(t *testing.T) {
 	}
 }
 
+func TestInMemoryProcessedEventStoreAllowsRetryAfterFailure(t *testing.T) {
+	store := NewInMemoryProcessedEventStore()
+	ctx := context.Background()
+
+	acquired, err := store.TryStart(ctx, "evt-risk-001", "case-risk-001", "worker-a")
+	if err != nil {
+		t.Fatalf("TryStart() error = %v", err)
+	}
+	if !acquired {
+		t.Fatalf("expected first TryStart to acquire")
+	}
+	if err := store.MarkFailed(ctx, "evt-risk-001", "temporary"); err != nil {
+		t.Fatalf("MarkFailed() error = %v", err)
+	}
+
+	retry, err := store.TryStart(ctx, "evt-risk-001", "case-risk-001", "worker-a")
+	if err != nil {
+		t.Fatalf("retry TryStart() error = %v", err)
+	}
+	if !retry {
+		t.Fatalf("expected failed event to be retryable")
+	}
+}
+
 func TestMySQLProcessedEventStoreTryStart(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -88,6 +112,33 @@ func TestMySQLProcessedEventStoreMarkProcessed(t *testing.T) {
 
 	if err := store.MarkProcessed(context.Background(), "evt-risk-001"); err != nil {
 		t.Fatalf("MarkProcessed() error = %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLProcessedEventStoreAllowsRetryAfterFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	store := NewMySQLProcessedEventStore(db)
+	mock.ExpectExec("INSERT INTO risk_worker_processed_events").
+		WithArgs("evt-risk-001", "case-risk-001", "worker-a").
+		WillReturnResult(sqlmock.NewResult(1, 2))
+
+	acquired, err := store.TryStart(context.Background(), "evt-risk-001", "case-risk-001", "worker-a")
+	if err != nil {
+		t.Fatalf("TryStart() error = %v", err)
+	}
+	if !acquired {
+		t.Fatalf("expected failed mysql event to be retryable")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

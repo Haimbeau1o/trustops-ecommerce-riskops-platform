@@ -56,6 +56,21 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 
 	secured := func(handler func(context.Context, *app.RequestContext)) func(context.Context, *app.RequestContext) {
 		return func(ctx context.Context, c *app.RequestContext) {
+			scope := c.FullPath()
+			if scope == "" {
+				scope = string(c.Path())
+			}
+			allowed, err := resolved.RateLimiter.Allow(ctx, fmt.Sprintf("%s:%s", c.ClientIP(), scope), resolved.Clock())
+			if err != nil {
+				c.JSON(500, utils.H{"error": "rate_limiter_unavailable"})
+				return
+			}
+			if !allowed {
+				resolved.RuntimeMetrics.IncRateLimitRejects()
+				c.JSON(429, utils.H{"error": "rate_limit_exceeded"})
+				return
+			}
+
 			apiKey := strings.TrimSpace(string(c.Request.Header.Peek("X-API-Key")))
 			if err := resolved.Authenticator.Authenticate(apiKey); err != nil {
 				resolved.RuntimeMetrics.IncAuthRejects()
@@ -68,22 +83,11 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 				return
 			}
 
-			allowed, err := resolved.RateLimiter.Allow(ctx, fmt.Sprintf("%s:%s", apiKey, string(c.Path())), resolved.Clock())
-			if err != nil {
-				c.JSON(500, utils.H{"error": "rate_limiter_unavailable"})
-				return
-			}
-			if !allowed {
-				resolved.RuntimeMetrics.IncRateLimitRejects()
-				c.JSON(429, utils.H{"error": "rate_limit_exceeded"})
-				return
-			}
-
 			handler(ctx, c)
 		}
 	}
 
-	h.POST("/api/v1/risk/events/ingest", secured(func(_ context.Context, c *app.RequestContext) {
+	h.POST("/api/v1/risk/events/ingest", secured(func(ctx context.Context, c *app.RequestContext) {
 		var req ingestRiskEventRequest
 		if err := json.Unmarshal(c.Request.Body(), &req); err != nil {
 			c.JSON(400, utils.H{"error": "invalid_json"})
@@ -113,7 +117,6 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 			OccurredAtMs:  occurredAtMs,
 			CreatedAt:     now.UTC(),
 		}
-		ctx := context.Background()
 		result, err := resolved.Repository.IngestCase(ctx, storage.IngestInput{
 			IdempotencyKey: resolveIdempotencyKey(c, req),
 			Case:           riskCase,
@@ -133,9 +136,9 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 		})
 	}))
 
-	h.GET("/api/v1/risk/cases/:case_id", secured(func(_ context.Context, c *app.RequestContext) {
+	h.GET("/api/v1/risk/cases/:case_id", secured(func(ctx context.Context, c *app.RequestContext) {
 		caseID := c.Param("case_id")
-		riskCase, err := resolved.Repository.GetCase(context.Background(), caseID)
+		riskCase, err := resolved.Repository.GetCase(ctx, caseID)
 		if err != nil {
 			if errors.Is(err, storage.ErrCaseNotFound) {
 				c.JSON(404, utils.H{"error": "case_not_found"})
@@ -164,9 +167,9 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 		})
 	}))
 
-	h.GET("/api/v1/risk/cases/:case_id/audit-logs", secured(func(_ context.Context, c *app.RequestContext) {
+	h.GET("/api/v1/risk/cases/:case_id/audit-logs", secured(func(ctx context.Context, c *app.RequestContext) {
 		caseID := c.Param("case_id")
-		items, err := resolved.Repository.ListAuditLogs(context.Background(), caseID, resolveAuditLimit(c))
+		items, err := resolved.Repository.ListAuditLogs(ctx, caseID, resolveAuditLimit(c))
 		if err != nil {
 			c.JSON(500, utils.H{"error": "audit_logs_unavailable"})
 			return
@@ -177,8 +180,8 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 		})
 	}))
 
-	h.GET("/api/v1/risk/ops/metrics", secured(func(_ context.Context, c *app.RequestContext) {
-		metrics, err := resolved.Repository.GetOpsMetrics(context.Background())
+	h.GET("/api/v1/risk/ops/metrics", secured(func(ctx context.Context, c *app.RequestContext) {
+		metrics, err := resolved.Repository.GetOpsMetrics(ctx)
 		if err != nil {
 			c.JSON(500, utils.H{"error": "ops_metrics_unavailable"})
 			return
@@ -186,8 +189,8 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 		c.JSON(200, metrics)
 	}))
 
-	h.GET("/metrics", secured(func(_ context.Context, c *app.RequestContext) {
-		metrics, err := resolved.Repository.GetOpsMetrics(context.Background())
+	h.GET("/metrics", secured(func(ctx context.Context, c *app.RequestContext) {
+		metrics, err := resolved.Repository.GetOpsMetrics(ctx)
 		if err != nil {
 			c.JSON(500, utils.H{"error": "ops_metrics_unavailable"})
 			return

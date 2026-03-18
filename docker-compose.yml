@@ -66,13 +66,13 @@ services:
       GATEWAY_HTTP_HOST: ${GATEWAY_HTTP_HOST:-0.0.0.0}
       GATEWAY_HTTP_PORT: ${GATEWAY_HTTP_PORT:-8080}
       GATEWAY_STORAGE_BACKEND: ${GATEWAY_STORAGE_BACKEND:-mysql}
-      GATEWAY_MYSQL_DSN: ${GATEWAY_MYSQL_DSN:-trustops:trustops@tcp(mysql:3306)/trustops?parseTime=true}
+      GATEWAY_MYSQL_DSN: ${GATEWAY_MYSQL_DSN:-${MYSQL_USER:-trustops}:${MYSQL_PASSWORD:-trustops}@tcp(mysql:3306)/${MYSQL_DATABASE:-trustops}?parseTime=true}
       GATEWAY_REDIS_ADDR: ${GATEWAY_REDIS_ADDR:-redis:6379}
       GATEWAY_REDIS_PASSWORD: ${GATEWAY_REDIS_PASSWORD:-}
       GATEWAY_REDIS_DB: ${GATEWAY_REDIS_DB:-0}
       GATEWAY_CASE_CACHE_TTL_SECONDS: ${GATEWAY_CASE_CACHE_TTL_SECONDS:-300}
       GATEWAY_MQ_BACKEND: ${GATEWAY_MQ_BACKEND:-rabbitmq}
-      GATEWAY_RABBITMQ_URL: ${GATEWAY_RABBITMQ_URL:-amqp://trustops:trustops@rabbitmq:5672/}
+      GATEWAY_RABBITMQ_URL: ${GATEWAY_RABBITMQ_URL:-amqp://${RABBITMQ_DEFAULT_USER:-trustops}:${RABBITMQ_DEFAULT_PASS:-trustops}@rabbitmq:5672/}
       GATEWAY_RABBITMQ_QUEUE: ${GATEWAY_RABBITMQ_QUEUE:-risk.case.ingested}
       GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-riskops-dev-key}
       GATEWAY_RATE_LIMIT_RPM: ${GATEWAY_RATE_LIMIT_RPM:-60}
@@ -95,11 +95,11 @@ services:
     restart: unless-stopped
     environment:
       WORKER_NAME: ${WORKER_NAME:-riskops-worker}
-      WORKER_RABBITMQ_URL: ${WORKER_RABBITMQ_URL:-amqp://trustops:trustops@rabbitmq:5672/}
+      WORKER_RABBITMQ_URL: ${WORKER_RABBITMQ_URL:-amqp://${RABBITMQ_DEFAULT_USER:-trustops}:${RABBITMQ_DEFAULT_PASS:-trustops}@rabbitmq:5672/}
       WORKER_RABBITMQ_QUEUE: ${WORKER_RABBITMQ_QUEUE:-risk.case.ingested}
       WORKER_PREFETCH: ${WORKER_PREFETCH:-10}
       WORKER_STORAGE_BACKEND: ${WORKER_STORAGE_BACKEND:-mysql}
-      WORKER_MYSQL_DSN: ${WORKER_MYSQL_DSN:-trustops:trustops@tcp(mysql:3306)/trustops?parseTime=true}
+      WORKER_MYSQL_DSN: ${WORKER_MYSQL_DSN:-${MYSQL_USER:-trustops}:${MYSQL_PASSWORD:-trustops}@tcp(mysql:3306)/${MYSQL_DATABASE:-trustops}?parseTime=true}
     depends_on:
       rabbitmq:
         condition: service_healthy

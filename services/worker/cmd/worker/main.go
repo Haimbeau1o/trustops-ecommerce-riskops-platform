@@ -47,6 +47,18 @@ func main() {
 		false,
 		false,
 		false,
+		queueDeclarationArgs(cfg.RabbitMQQueue),
+	)
+	if err != nil {
+		log.Fatalf("worker failed to declare queue: %v", err)
+	}
+
+	_, err = ch.QueueDeclare(
+		deadLetterQueueName(cfg.RabbitMQQueue),
+		true,
+		false,
+		false,
+		false,
 		nil,
 	)
 	if err != nil {
@@ -102,4 +114,15 @@ func buildProcessedEventStore(cfg config.Config) (workerstorage.ProcessedEventSt
 		return nil, err
 	}
 	return workerstorage.NewMySQLProcessedEventStore(db), nil
+}
+
+func deadLetterQueueName(queue string) string {
+	return queue + ".dlq"
+}
+
+func queueDeclarationArgs(queue string) amqp.Table {
+	return amqp.Table{
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": deadLetterQueueName(queue),
+	}
 }
