@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,9 +29,12 @@ type ingestRiskEventRequest struct {
 
 // Dependencies are injectable runtime components for the router.
 type Dependencies struct {
-	Repository  storage.Repository
-	IDGenerator func() string
-	Clock       func() time.Time
+	Repository     storage.Repository
+	Authenticator  Authenticator
+	RateLimiter    RateLimiter
+	RuntimeMetrics *RuntimeMetrics
+	IDGenerator    func() string
+	Clock          func() time.Time
 }
 
 // NewRouter builds the API surface for the risk-ops gateway.
@@ -50,7 +54,36 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 		})
 	})
 
-	h.POST("/api/v1/risk/events/ingest", func(_ context.Context, c *app.RequestContext) {
+	secured := func(handler func(context.Context, *app.RequestContext)) func(context.Context, *app.RequestContext) {
+		return func(ctx context.Context, c *app.RequestContext) {
+			apiKey := strings.TrimSpace(string(c.Request.Header.Peek("X-API-Key")))
+			if err := resolved.Authenticator.Authenticate(apiKey); err != nil {
+				resolved.RuntimeMetrics.IncAuthRejects()
+				switch {
+				case errors.Is(err, ErrAPIKeyRequired):
+					c.JSON(401, utils.H{"error": "api_key_required"})
+				default:
+					c.JSON(403, utils.H{"error": "api_key_invalid"})
+				}
+				return
+			}
+
+			allowed, err := resolved.RateLimiter.Allow(ctx, fmt.Sprintf("%s:%s", apiKey, string(c.Path())), resolved.Clock())
+			if err != nil {
+				c.JSON(500, utils.H{"error": "rate_limiter_unavailable"})
+				return
+			}
+			if !allowed {
+				resolved.RuntimeMetrics.IncRateLimitRejects()
+				c.JSON(429, utils.H{"error": "rate_limit_exceeded"})
+				return
+			}
+
+			handler(ctx, c)
+		}
+	}
+
+	h.POST("/api/v1/risk/events/ingest", secured(func(_ context.Context, c *app.RequestContext) {
 		var req ingestRiskEventRequest
 		if err := json.Unmarshal(c.Request.Body(), &req); err != nil {
 			c.JSON(400, utils.H{"error": "invalid_json"})
@@ -98,9 +131,9 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 			"idempotent_replay": result.IdempotentReplay,
 			"async_status":      "queued_in_outbox",
 		})
-	})
+	}))
 
-	h.GET("/api/v1/risk/cases/:case_id", func(_ context.Context, c *app.RequestContext) {
+	h.GET("/api/v1/risk/cases/:case_id", secured(func(_ context.Context, c *app.RequestContext) {
 		caseID := c.Param("case_id")
 		riskCase, err := resolved.Repository.GetCase(context.Background(), caseID)
 		if err != nil {
@@ -129,16 +162,39 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 			"evidence_items": riskCase.EvidenceItems,
 			"risk_score":     riskCase.RiskScore,
 		})
-	})
+	}))
 
-	h.GET("/api/v1/risk/ops/metrics", func(_ context.Context, c *app.RequestContext) {
+	h.GET("/api/v1/risk/cases/:case_id/audit-logs", secured(func(_ context.Context, c *app.RequestContext) {
+		caseID := c.Param("case_id")
+		items, err := resolved.Repository.ListAuditLogs(context.Background(), caseID, resolveAuditLimit(c))
+		if err != nil {
+			c.JSON(500, utils.H{"error": "audit_logs_unavailable"})
+			return
+		}
+		c.JSON(200, utils.H{
+			"case_id": caseID,
+			"items":   items,
+		})
+	}))
+
+	h.GET("/api/v1/risk/ops/metrics", secured(func(_ context.Context, c *app.RequestContext) {
 		metrics, err := resolved.Repository.GetOpsMetrics(context.Background())
 		if err != nil {
 			c.JSON(500, utils.H{"error": "ops_metrics_unavailable"})
 			return
 		}
 		c.JSON(200, metrics)
-	})
+	}))
+
+	h.GET("/metrics", secured(func(_ context.Context, c *app.RequestContext) {
+		metrics, err := resolved.Repository.GetOpsMetrics(context.Background())
+		if err != nil {
+			c.JSON(500, utils.H{"error": "ops_metrics_unavailable"})
+			return
+		}
+		c.Response.Header.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		c.String(200, resolved.RuntimeMetrics.RenderPrometheus(metrics))
+	}))
 
 	return h
 }
@@ -146,6 +202,15 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 func resolveDependencies(deps Dependencies) Dependencies {
 	if deps.Repository == nil {
 		deps.Repository = storage.NewInMemoryRepository()
+	}
+	if deps.Authenticator == nil {
+		deps.Authenticator = NewAllowAllAuthenticator()
+	}
+	if deps.RateLimiter == nil {
+		deps.RateLimiter = NewNoopRateLimiter()
+	}
+	if deps.RuntimeMetrics == nil {
+		deps.RuntimeMetrics = NewRuntimeMetrics()
 	}
 	if deps.IDGenerator == nil {
 		deps.IDGenerator = func() string {
@@ -158,6 +223,21 @@ func resolveDependencies(deps Dependencies) Dependencies {
 		}
 	}
 	return deps
+}
+
+func resolveAuditLimit(c *app.RequestContext) int {
+	raw := strings.TrimSpace(string(c.Request.URI().QueryArgs().Peek("limit")))
+	if raw == "" {
+		return 20
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return 20
+	}
+	if parsed > 100 {
+		return 100
+	}
+	return parsed
 }
 
 func resolveIdempotencyKey(c *app.RequestContext, req ingestRiskEventRequest) string {

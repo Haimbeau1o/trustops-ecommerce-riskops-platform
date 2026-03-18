@@ -27,10 +27,10 @@
 ## 关键技能点 / 知识点
 
 本仓库重点覆盖以下能力：
-- 后端服务工程：分层架构、接口契约、幂等与重试
+- 后端服务工程：分层架构、接口契约、幂等、重试、鉴权与限流
 - 业务抽象能力：风险事件、规则、案件状态机的领域建模
 - 中间件能力：MySQL、Redis、RabbitMQ 的协同使用
-- 稳定性与安全：审计日志、可追踪链路、失败补偿
+- 稳定性与安全：审计日志、可追踪链路、失败补偿、消费者去重、Prometheus 指标
 - AI 工程化：作为 Copilot 增强能力接入主流程
 
 详细知识树见 [docs/knowledge-points.md](docs/knowledge-points.md)。
@@ -54,8 +54,8 @@
 
 ## 模块拆分
 
-- `services/gateway-go`：网关、鉴权、限流、路由、核心业务接口
-- `services/worker`：异步任务、重试、回放、补偿
+- `services/gateway-go`：网关、鉴权、限流、路由、核心业务接口、审计查询、Prometheus 指标
+- `services/worker`：异步任务、重试、回放、补偿、消费者幂等去重
 - `services/ai-copilot`：AI 增强服务（摘要、相似案例、排查建议）
 - `infra`：部署、观测、配置模板
 - `scripts`：本地开发与验证脚本
@@ -89,21 +89,27 @@ trustops-ecommerce-riskops-platform/
 
 ## 当前状态
 
-当前为 phase-3 运行时骨架（可演示后端平台主链路）：
+当前为 phase-4 运行时骨架（可演示后端平台主链路）：
 - Go Hertz gateway（env 驱动配置）
   - `GET /healthz`
   - `POST /api/v1/risk/events/ingest`
   - `GET /api/v1/risk/cases/:case_id`
+  - `GET /api/v1/risk/cases/:case_id/audit-logs`
   - `GET /api/v1/risk/ops/metrics`
+  - `GET /metrics`
 - 风险案例仓储抽象
   - `MySQL` 持久化
   - `Redis` 案件查询缓存
   - `In-memory` 测试/兜底实现
-- phase-3 可靠性能力
+- phase-3/4 平台能力
   - ingest 幂等：优先使用 `X-Idempotency-Key`，缺省时回退到稳定请求指纹
   - 事务 outbox：案件、幂等记录、outbox、审计日志一次事务写入
   - outbox relay：Gateway 后台轮询待投递事件，失败进入 retry / dead-letter 状态
-  - ops metrics：可直接查看 ingest、replay、pending outbox、dead-letter 聚合指标
+  - API key 鉴权：通过 `X-API-Key` 保护 ingest / case / audit / metrics 路由
+  - rate limit：Redis 优先，内存兜底，演示后端安全治理能力
+  - audit query：支持按 case 查询审计轨迹
+  - Prometheus metrics：导出 ingest、replay、pending、dead-letter、audit、auth reject、rate-limit reject
+  - worker dedup：消费端将 `event_id` 持久化到 MySQL，重复投递仅 `Ack + skip`
 - Python FastAPI copilot（AI 增强，不替代主流程）
   - `GET /healthz`
   - `POST /copilot/risk/summary`
@@ -117,6 +123,12 @@ cp .env.example .env
 ```
 
 `.env.example` 记录了 demo 所需变量，默认值可直接用于 `docker compose` 本地运行。
+phase 4 新增的关键变量包括：
+- `GATEWAY_API_KEYS`
+- `GATEWAY_RATE_LIMIT_RPM`
+- `GATEWAY_RATE_LIMIT_PREFIX`
+- `WORKER_STORAGE_BACKEND`
+- `WORKER_MYSQL_DSN`
 
 ### 2) 运行测试（不依赖外部中间件）
 
@@ -173,6 +185,7 @@ curl http://127.0.0.1:8080/healthz
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/risk/events/ingest \
+  -H "X-API-Key: riskops-dev-key" \
   -H "X-Idempotency-Key: demo-risk-001" \
   -H "Content-Type: application/json" \
   -d '{"merchant_id":"merchant-1001","event_type":"abnormal_listing_activity","evidence":["sku_spike","ip_anomaly"],"risk_score":0.87}'
@@ -181,13 +194,29 @@ curl -X POST http://127.0.0.1:8080/api/v1/risk/events/ingest \
 风险案例查询：
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/risk/cases/case-risk-001
+curl http://127.0.0.1:8080/api/v1/risk/cases/case-risk-001 \
+  -H "X-API-Key: riskops-dev-key"
+```
+
+案件审计日志查询：
+
+```bash
+curl http://127.0.0.1:8080/api/v1/risk/cases/case-risk-001/audit-logs \
+  -H "X-API-Key: riskops-dev-key"
 ```
 
 运营指标查询：
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/risk/ops/metrics
+curl http://127.0.0.1:8080/api/v1/risk/ops/metrics \
+  -H "X-API-Key: riskops-dev-key"
+```
+
+Prometheus 指标：
+
+```bash
+curl http://127.0.0.1:8080/metrics \
+  -H "X-API-Key: riskops-dev-key"
 ```
 
 Copilot 风险摘要：
@@ -204,11 +233,14 @@ curl -X POST http://127.0.0.1:8000/copilot/risk/summary \
 ./scripts/sample_requests.sh
 ```
 
-## Phase 3 亮点
+## Phase 4 亮点
 
 - 幂等入口：重复请求不会重复建案，适合“网络抖动 + 客户端重试”的真实场景。
 - 可靠异步：案件主数据与 outbox 事件同事务提交，避免“库里有数据但队列没消息”。
-- 可运维：通过 metrics 可直接演示 pending / dead-letter 状态，方便面试时讲稳定性治理。
+- 安全治理：`X-API-Key` + 限流中间件把“后端安全工程”能力直接落到接口层。
+- 可审计：case 维度的 audit logs 让运营动作、重放、补偿都有证据链。
+- 可运维：通过 `/metrics` 可直接演示 pending / dead-letter / auth reject / rate-limit reject 状态，方便面试时讲稳定性治理。
+- 消费者可靠性：worker 侧持久化 dedup 能讲清楚“入口幂等”之外的消息消费一致性。
 - AI 边界清晰：Copilot 只做摘要和建议，不进入主判定链路。
 
 ## 依赖说明

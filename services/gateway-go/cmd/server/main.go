@@ -59,9 +59,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("gateway publisher init failed: %v", err)
 	}
+	runtimeMetrics := gatewayhttp.NewRuntimeMetrics()
 
 	app := gatewayhttp.NewRouterWithHostPort(cfg.HostPort(), gatewayhttp.Dependencies{
-		Repository: repo,
+		Repository:     repo,
+		Authenticator:  buildAuthenticator(cfg),
+		RateLimiter:    buildRateLimiter(cfg),
+		RuntimeMetrics: runtimeMetrics,
 	})
 	startOutboxRelay(repo, publisher)
 	log.Printf("gateway-go listening on %s with storage=%s mq=%s", cfg.HostPort(), cfg.StorageBackend, cfg.MQBackend)
@@ -107,6 +111,25 @@ func buildPublisher(cfg config.Config) (mq.Publisher, error) {
 		return nil, err
 	}
 	return publisher, nil
+}
+
+func buildAuthenticator(cfg config.Config) gatewayhttp.Authenticator {
+	return gatewayhttp.NewAPIKeyAuthenticator(cfg.APIKeys)
+}
+
+func buildRateLimiter(cfg config.Config) gatewayhttp.RateLimiter {
+	if cfg.RateLimitRPM <= 0 {
+		return gatewayhttp.NewNoopRateLimiter()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := pingRedis(ctx, cfg); err != nil {
+		log.Printf("failed to ping redis for rate limiting, continue with in-memory limiter: %v", err)
+		return gatewayhttp.NewInMemoryRateLimiter(cfg.RateLimitRPM)
+	}
+
+	return gatewayhttp.NewRedisRateLimiter(newRedisCacheClient(cfg), cfg.RateLimitPrefix, cfg.RateLimitRPM)
 }
 
 func startOutboxRelay(repo storage.Repository, publisher mq.Publisher) {

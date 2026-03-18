@@ -10,6 +10,7 @@ import (
 
 // CaseIngestedEvent is a lightweight event emitted after a case is ingested.
 type CaseIngestedEvent struct {
+	EventID      string  `json:"event_id"`
 	CaseID       string  `json:"case_id"`
 	MerchantID   string  `json:"merchant_id"`
 	EventType    string  `json:"event_type"`

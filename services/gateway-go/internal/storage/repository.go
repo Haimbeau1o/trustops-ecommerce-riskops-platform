@@ -41,12 +41,22 @@ type IngestResult struct {
 	ReplayCount      int
 }
 
+// AuditLog captures one auditable state transition or reliability event.
+type AuditLog struct {
+	ID        int64          `json:"id"`
+	CaseID    string         `json:"case_id"`
+	Action    string         `json:"action"`
+	Detail    map[string]any `json:"detail"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
 // OpsMetrics summarizes JD-aligned runtime reliability signals.
 type OpsMetrics struct {
 	TotalIngests         int64 `json:"total_ingests"`
 	IdempotentReplays    int64 `json:"idempotent_replays"`
 	PendingOutboxEvents  int64 `json:"pending_outbox_events"`
 	DeadLetterOutboxRows int64 `json:"dead_letter_outbox_rows"`
+	AuditLogCount        int64 `json:"audit_log_count"`
 }
 
 // OutboxItem represents one pending queue dispatch job.
@@ -64,6 +74,7 @@ type Repository interface {
 	IngestCase(ctx context.Context, input IngestInput) (IngestResult, error)
 	GetCase(ctx context.Context, caseID string) (Case, error)
 	GetOpsMetrics(ctx context.Context) (OpsMetrics, error)
+	ListAuditLogs(ctx context.Context, caseID string, limit int) ([]AuditLog, error)
 	ListPendingOutbox(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error)
 	MarkOutboxPublished(ctx context.Context, id int64) error
 	MarkOutboxFailed(ctx context.Context, item OutboxItem, lastError string, nextAttemptAt time.Time, maxAttempts int) (bool, error)
@@ -93,6 +104,8 @@ type InMemoryRepository struct {
 	ingests       map[string]ingestRecord
 	outbox        map[int64]inMemoryOutboxItem
 	nextOutboxID  int64
+	auditLogs     []AuditLog
+	nextAuditID   int64
 	auditLogCount int64
 }
 
@@ -122,8 +135,11 @@ func (r *InMemoryRepository) IngestCase(_ context.Context, input IngestInput) (I
 	if record, ok := r.ingests[input.IdempotencyKey]; ok {
 		record.ReplayCount++
 		r.ingests[input.IdempotencyKey] = record
-		r.auditLogCount++
 		existing := r.cases[record.CaseID]
+		r.appendAuditLocked(record.CaseID, "idempotent_replay", map[string]any{
+			"idempotency_key": input.IdempotencyKey,
+			"replay_count":    record.ReplayCount,
+		})
 		return IngestResult{
 			Case:             existing,
 			IdempotentReplay: true,
@@ -134,7 +150,7 @@ func (r *InMemoryRepository) IngestCase(_ context.Context, input IngestInput) (I
 	r.storeCase(input.Case)
 	r.ingests[input.IdempotencyKey] = ingestRecord{CaseID: input.Case.CaseID}
 	r.nextOutboxID++
-	payload, err := buildOutboxPayload(input.Case)
+	payload, err := buildOutboxPayload(input)
 	if err != nil {
 		return IngestResult{}, err
 	}
@@ -149,7 +165,10 @@ func (r *InMemoryRepository) IngestCase(_ context.Context, input IngestInput) (I
 		Status:        "pending",
 		NextAttemptAt: time.Now().UTC(),
 	}
-	r.auditLogCount++
+	r.appendAuditLocked(input.Case.CaseID, "case_ingested", map[string]any{
+		"idempotency_key": input.IdempotencyKey,
+		"event_type":      input.Case.EventType,
+	})
 	return IngestResult{Case: input.Case}, nil
 }
 
@@ -183,7 +202,29 @@ func (r *InMemoryRepository) GetOpsMetrics(_ context.Context) (OpsMetrics, error
 			metrics.DeadLetterOutboxRows++
 		}
 	}
+	metrics.AuditLogCount = r.auditLogCount
 	return metrics, nil
+}
+
+func (r *InMemoryRepository) ListAuditLogs(_ context.Context, caseID string, limit int) ([]AuditLog, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	logs := make([]AuditLog, 0, limit)
+	for i := len(r.auditLogs) - 1; i >= 0; i-- {
+		entry := r.auditLogs[i]
+		if entry.CaseID != caseID {
+			continue
+		}
+		logs = append(logs, cloneAuditLog(entry))
+		if len(logs) >= limit {
+			break
+		}
+	}
+	return logs, nil
 }
 
 func (r *InMemoryRepository) ListPendingOutbox(_ context.Context, now time.Time, limit int) ([]OutboxItem, error) {
@@ -218,7 +259,7 @@ func (r *InMemoryRepository) MarkOutboxPublished(_ context.Context, id int64) er
 	return nil
 }
 
-func (r *InMemoryRepository) MarkOutboxFailed(_ context.Context, item OutboxItem, _ string, nextAttemptAt time.Time, maxAttempts int) (bool, error) {
+func (r *InMemoryRepository) MarkOutboxFailed(_ context.Context, item OutboxItem, lastError string, nextAttemptAt time.Time, maxAttempts int) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -230,11 +271,21 @@ func (r *InMemoryRepository) MarkOutboxFailed(_ context.Context, item OutboxItem
 	if current.PublishAttempts >= maxAttempts {
 		current.Status = "dead_letter"
 		r.outbox[item.ID] = current
+		r.appendAuditLocked(current.CaseID, "outbox_dead_letter", map[string]any{
+			"outbox_id": item.ID,
+			"error":     lastError,
+		})
 		return true, nil
 	}
 	current.Status = "retry"
 	current.NextAttemptAt = nextAttemptAt
 	r.outbox[item.ID] = current
+	r.appendAuditLocked(current.CaseID, "outbox_retry_scheduled", map[string]any{
+		"outbox_id":        item.ID,
+		"error":            lastError,
+		"next_attempt_at":  nextAttemptAt.UTC().Format(time.RFC3339),
+		"publish_attempts": current.PublishAttempts,
+	})
 	return false, nil
 }
 
@@ -243,6 +294,18 @@ func (r *InMemoryRepository) storeCase(c Case) {
 		c.CreatedAt = time.Now().UTC()
 	}
 	r.cases[c.CaseID] = c
+}
+
+func (r *InMemoryRepository) appendAuditLocked(caseID, action string, detail map[string]any) {
+	r.nextAuditID++
+	r.auditLogCount++
+	r.auditLogs = append(r.auditLogs, AuditLog{
+		ID:        r.nextAuditID,
+		CaseID:    caseID,
+		Action:    action,
+		Detail:    cloneDetail(detail),
+		CreatedAt: time.Now().UTC(),
+	})
 }
 
 // CachedRepository is a decorator that adds read-through/write-through caching.
@@ -293,6 +356,10 @@ func (r *CachedRepository) GetCase(ctx context.Context, caseID string) (Case, er
 
 func (r *CachedRepository) GetOpsMetrics(ctx context.Context) (OpsMetrics, error) {
 	return r.base.GetOpsMetrics(ctx)
+}
+
+func (r *CachedRepository) ListAuditLogs(ctx context.Context, caseID string, limit int) ([]AuditLog, error) {
+	return r.base.ListAuditLogs(ctx, caseID, limit)
 }
 
 func (r *CachedRepository) ListPendingOutbox(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error) {
@@ -381,7 +448,7 @@ func (r *MySQLRepository) IngestCase(ctx context.Context, input IngestInput) (In
 		); err != nil {
 			return IngestResult{}, err
 		}
-		payload, err := buildOutboxPayload(input.Case)
+		payload, err := buildOutboxPayload(input)
 		if err != nil {
 			return IngestResult{}, err
 		}
@@ -430,13 +497,56 @@ func (r *MySQLRepository) GetOpsMetrics(ctx context.Context) (OpsMetrics, error)
 	if err != nil {
 		return OpsMetrics{}, err
 	}
+	auditLogCount, err := countQuery(ctx, r.db, "SELECT COUNT(*) FROM risk_audit_logs")
+	if err != nil {
+		return OpsMetrics{}, err
+	}
 
 	return OpsMetrics{
 		TotalIngests:         totalIngests,
 		IdempotentReplays:    idempotentReplays,
 		PendingOutboxEvents:  pendingOutbox,
 		DeadLetterOutboxRows: deadLetterRows,
+		AuditLogCount:        auditLogCount,
 	}, nil
+}
+
+func (r *MySQLRepository) ListAuditLogs(ctx context.Context, caseID string, limit int) ([]AuditLog, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := r.db.QueryContext(
+		ctx,
+		"SELECT id, case_id, action, detail_json, UNIX_TIMESTAMP(created_at) AS created_at_unix FROM risk_audit_logs WHERE case_id = ? ORDER BY id DESC LIMIT ?",
+		caseID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	logs := make([]AuditLog, 0, limit)
+	for rows.Next() {
+		var entry AuditLog
+		var detailJSON string
+		var createdAtUnix int64
+		if err := rows.Scan(&entry.ID, &entry.CaseID, &entry.Action, &detailJSON, &createdAtUnix); err != nil {
+			return nil, err
+		}
+		if detailJSON != "" {
+			if err := json.Unmarshal([]byte(detailJSON), &entry.Detail); err != nil {
+				return nil, err
+			}
+		}
+		entry.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+		logs = append(logs, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return logs, nil
 }
 
 func (r *MySQLRepository) ListPendingOutbox(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error) {
@@ -601,8 +711,10 @@ func getCase(ctx context.Context, queryer sqlQueryer, caseID string) (Case, erro
 	return c, nil
 }
 
-func buildOutboxPayload(c Case) ([]byte, error) {
+func buildOutboxPayload(input IngestInput) ([]byte, error) {
+	c := input.Case
 	return json.Marshal(map[string]any{
+		"event_id":       input.IdempotencyKey,
 		"case_id":        c.CaseID,
 		"merchant_id":    c.MerchantID,
 		"event_type":     c.EventType,
@@ -632,6 +744,22 @@ func countQuery(ctx context.Context, queryer sqlQueryer, query string) (int64, e
 		return 0, err
 	}
 	return count, nil
+}
+
+func cloneAuditLog(entry AuditLog) AuditLog {
+	entry.Detail = cloneDetail(entry.Detail)
+	return entry
+}
+
+func cloneDetail(detail map[string]any) map[string]any {
+	if len(detail) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(detail))
+	for key, value := range detail {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 type sqlExecer interface {

@@ -8,6 +8,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"trustops-ecommerce-riskops-platform/services/gateway-go/internal/config"
+	gatewayhttp "trustops-ecommerce-riskops-platform/services/gateway-go/internal/http"
 	"trustops-ecommerce-riskops-platform/services/gateway-go/internal/mq"
 	"trustops-ecommerce-riskops-platform/services/gateway-go/internal/storage"
 )
@@ -95,5 +96,28 @@ func TestBuildPublisherFailsWhenRabbitMQRequiredButUnavailable(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected rabbitmq-backed publisher init to fail")
+	}
+}
+
+func TestBuildRateLimiterFallsBackToInMemoryWhenRedisUnavailable(t *testing.T) {
+	prevPingRedis := pingRedis
+	t.Cleanup(func() {
+		pingRedis = prevPingRedis
+	})
+
+	pingRedis = func(context.Context, config.Config) error {
+		return errors.New("redis unavailable")
+	}
+
+	limiter := buildRateLimiter(config.Config{
+		RedisAddr:       "redis:6379",
+		RateLimitRPM:    30,
+		RateLimitPrefix: "riskops",
+	})
+	if limiter == nil {
+		t.Fatalf("expected non-nil limiter")
+	}
+	if _, ok := limiter.(*gatewayhttp.InMemoryRateLimiter); !ok {
+		t.Fatalf("expected in-memory limiter fallback, got %T", limiter)
 	}
 }

@@ -17,6 +17,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("GATEWAY_MQ_BACKEND", "")
 	t.Setenv("GATEWAY_RABBITMQ_URL", "")
 	t.Setenv("GATEWAY_RABBITMQ_QUEUE", "")
+	t.Setenv("GATEWAY_API_KEYS", "")
+	t.Setenv("GATEWAY_RATE_LIMIT_RPM", "")
+	t.Setenv("GATEWAY_RATE_LIMIT_PREFIX", "")
 
 	cfg := Load()
 
@@ -50,6 +53,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RabbitMQQueue != "risk.case.ingested" {
 		t.Fatalf("expected default queue risk.case.ingested, got %q", cfg.RabbitMQQueue)
 	}
+	if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "riskops-dev-key" {
+		t.Fatalf("expected default api keys [riskops-dev-key], got %#v", cfg.APIKeys)
+	}
+	if cfg.RateLimitRPM != 60 {
+		t.Fatalf("expected default rate limit rpm 60, got %d", cfg.RateLimitRPM)
+	}
+	if cfg.RateLimitPrefix != "riskops" {
+		t.Fatalf("expected default rate limit prefix riskops, got %q", cfg.RateLimitPrefix)
+	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -64,6 +76,9 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("GATEWAY_MQ_BACKEND", "rabbitmq")
 	t.Setenv("GATEWAY_RABBITMQ_URL", "amqp://trustops:trustops@localhost:5672/")
 	t.Setenv("GATEWAY_RABBITMQ_QUEUE", "risk.ops.case.events")
+	t.Setenv("GATEWAY_API_KEYS", "ops-a,ops-b")
+	t.Setenv("GATEWAY_RATE_LIMIT_RPM", "120")
+	t.Setenv("GATEWAY_RATE_LIMIT_PREFIX", "riskops-prod")
 
 	cfg := Load()
 
@@ -99,5 +114,14 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if cfg.RabbitMQQueue != "risk.ops.case.events" {
 		t.Fatalf("unexpected rabbitmq queue %q", cfg.RabbitMQQueue)
+	}
+	if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != "ops-a" || cfg.APIKeys[1] != "ops-b" {
+		t.Fatalf("unexpected api keys %#v", cfg.APIKeys)
+	}
+	if cfg.RateLimitRPM != 120 {
+		t.Fatalf("unexpected rate limit rpm %d", cfg.RateLimitRPM)
+	}
+	if cfg.RateLimitPrefix != "riskops-prod" {
+		t.Fatalf("unexpected rate limit prefix %q", cfg.RateLimitPrefix)
 	}
 }

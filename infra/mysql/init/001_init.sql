@@ -46,3 +46,16 @@ CREATE TABLE IF NOT EXISTS risk_audit_logs (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_risk_audit_case_created (case_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS risk_worker_processed_events (
+  event_id VARCHAR(128) PRIMARY KEY,
+  case_id VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'processing',
+  consumer_name VARCHAR(128) NOT NULL DEFAULT '',
+  processed_at TIMESTAMP NULL DEFAULT NULL,
+  last_error VARCHAR(255) NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_risk_worker_processed_case_id (case_id),
+  KEY idx_risk_worker_processed_status (status, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -23,6 +23,10 @@ type Config struct {
 	MQBackend     string
 	RabbitMQURL   string
 	RabbitMQQueue string
+
+	APIKeys         []string
+	RateLimitRPM    int
+	RateLimitPrefix string
 }
 
 // Load reads configuration from environment with sensible defaults.
@@ -41,6 +45,10 @@ func Load() Config {
 		MQBackend:     strings.ToLower(envOrDefault("GATEWAY_MQ_BACKEND", "noop")),
 		RabbitMQURL:   envOrDefault("GATEWAY_RABBITMQ_URL", "amqp://trustops:trustops@rabbitmq:5672/"),
 		RabbitMQQueue: envOrDefault("GATEWAY_RABBITMQ_QUEUE", "risk.case.ingested"),
+
+		APIKeys:         splitCSV(envOrDefault("GATEWAY_API_KEYS", "riskops-dev-key")),
+		RateLimitRPM:    envIntOrDefault("GATEWAY_RATE_LIMIT_RPM", 60),
+		RateLimitPrefix: envOrDefault("GATEWAY_RATE_LIMIT_PREFIX", "riskops"),
 	}
 }
 
@@ -66,4 +74,17 @@ func envIntOrDefault(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		items = append(items, trimmed)
+	}
+	return items
 }

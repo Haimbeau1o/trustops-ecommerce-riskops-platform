@@ -74,6 +74,9 @@ services:
       GATEWAY_MQ_BACKEND: ${GATEWAY_MQ_BACKEND:-rabbitmq}
       GATEWAY_RABBITMQ_URL: ${GATEWAY_RABBITMQ_URL:-amqp://trustops:trustops@rabbitmq:5672/}
       GATEWAY_RABBITMQ_QUEUE: ${GATEWAY_RABBITMQ_QUEUE:-risk.case.ingested}
+      GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-riskops-dev-key}
+      GATEWAY_RATE_LIMIT_RPM: ${GATEWAY_RATE_LIMIT_RPM:-60}
+      GATEWAY_RATE_LIMIT_PREFIX: ${GATEWAY_RATE_LIMIT_PREFIX:-riskops}
     ports:
       - "8080:8080"
     depends_on:
@@ -95,8 +98,12 @@ services:
       WORKER_RABBITMQ_URL: ${WORKER_RABBITMQ_URL:-amqp://trustops:trustops@rabbitmq:5672/}
       WORKER_RABBITMQ_QUEUE: ${WORKER_RABBITMQ_QUEUE:-risk.case.ingested}
       WORKER_PREFETCH: ${WORKER_PREFETCH:-10}
+      WORKER_STORAGE_BACKEND: ${WORKER_STORAGE_BACKEND:-mysql}
+      WORKER_MYSQL_DSN: ${WORKER_MYSQL_DSN:-trustops:trustops@tcp(mysql:3306)/trustops?parseTime=true}
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      mysql:
         condition: service_healthy
       gateway:
         condition: service_started

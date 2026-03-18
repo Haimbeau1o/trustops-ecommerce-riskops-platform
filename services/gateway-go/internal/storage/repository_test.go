@@ -59,6 +59,10 @@ func (f *fakeBaseRepo) GetOpsMetrics(_ context.Context) (OpsMetrics, error) {
 	return OpsMetrics{}, nil
 }
 
+func (f *fakeBaseRepo) ListAuditLogs(_ context.Context, _ string, _ int) ([]AuditLog, error) {
+	return nil, nil
+}
+
 func (f *fakeBaseRepo) ListPendingOutbox(_ context.Context, _ time.Time, _ int) ([]OutboxItem, error) {
 	return nil, nil
 }
@@ -262,6 +266,9 @@ func TestInMemoryRepositoryIngestCaseDeduplicatesByIdempotencyKey(t *testing.T) 
 	if metrics.PendingOutboxEvents != 1 {
 		t.Fatalf("expected 1 pending outbox row, got %d", metrics.PendingOutboxEvents)
 	}
+	if metrics.AuditLogCount != 2 {
+		t.Fatalf("expected 2 audit logs, got %d", metrics.AuditLogCount)
+	}
 }
 
 func TestInMemoryRepositoryMarksOutboxDeadLetterAfterFailures(t *testing.T) {
@@ -306,5 +313,84 @@ func TestInMemoryRepositoryMarksOutboxDeadLetterAfterFailures(t *testing.T) {
 	}
 	if metrics.DeadLetterOutboxRows != 1 {
 		t.Fatalf("expected 1 dead-letter row, got %d", metrics.DeadLetterOutboxRows)
+	}
+	if metrics.AuditLogCount != 2 {
+		t.Fatalf("expected 2 audit logs, got %d", metrics.AuditLogCount)
+	}
+}
+
+func TestInMemoryRepositoryListAuditLogsNewestFirst(t *testing.T) {
+	repo := NewInMemoryRepository()
+	ctx := context.Background()
+	input := IngestInput{
+		IdempotencyKey: "idem-risk-001",
+		Case: Case{
+			CaseID:        "case-risk-001",
+			MerchantID:    "merchant-1001",
+			EventType:     "abnormal_listing_activity",
+			RiskCategory:  "listing_fraud",
+			CaseStatus:    "pending_review",
+			EvidenceItems: []string{"sku_spike", "ip_anomaly"},
+			RiskScore:     0.87,
+			OccurredAtMs:  1_710_000_000_000,
+		},
+	}
+
+	if _, err := repo.IngestCase(ctx, input); err != nil {
+		t.Fatalf("IngestCase() error = %v", err)
+	}
+	if _, err := repo.IngestCase(ctx, input); err != nil {
+		t.Fatalf("second IngestCase() error = %v", err)
+	}
+
+	logs, err := repo.ListAuditLogs(ctx, "case-risk-001", 10)
+	if err != nil {
+		t.Fatalf("ListAuditLogs() error = %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 audit logs, got %d", len(logs))
+	}
+	if logs[0].Action != "idempotent_replay" {
+		t.Fatalf("expected newest log to be idempotent_replay, got %q", logs[0].Action)
+	}
+	if logs[1].Action != "case_ingested" {
+		t.Fatalf("expected older log to be case_ingested, got %q", logs[1].Action)
+	}
+}
+
+func TestMySQLRepositoryListAuditLogs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	repo := NewMySQLRepository(db)
+	rows := sqlmock.NewRows([]string{"id", "case_id", "action", "detail_json", "created_at_unix"}).
+		AddRow(2, "case-risk-001", "idempotent_replay", `{"replay_count":1}`, int64(1_710_000_001)).
+		AddRow(1, "case-risk-001", "case_ingested", `{"event_type":"abnormal_listing_activity"}`, int64(1_710_000_000))
+
+	mock.ExpectQuery("SELECT id, case_id, action, detail_json, UNIX_TIMESTAMP\\(created_at\\) AS created_at_unix FROM risk_audit_logs WHERE case_id = \\? ORDER BY id DESC LIMIT \\?").
+		WithArgs("case-risk-001", 2).
+		WillReturnRows(rows)
+
+	logs, err := repo.ListAuditLogs(context.Background(), "case-risk-001", 2)
+	if err != nil {
+		t.Fatalf("ListAuditLogs() error = %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 audit logs, got %d", len(logs))
+	}
+	if logs[0].Action != "idempotent_replay" {
+		t.Fatalf("unexpected first action %q", logs[0].Action)
+	}
+	if got := logs[1].Detail["event_type"]; got != "abnormal_listing_activity" {
+		t.Fatalf("unexpected detail event_type %#v", got)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }

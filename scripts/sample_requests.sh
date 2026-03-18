@@ -4,12 +4,14 @@ set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8080}"
 COPILOT_URL="${COPILOT_URL:-http://127.0.0.1:8000}"
+API_KEY="${API_KEY:-riskops-dev-key}"
 
 echo "[1/5] Gateway healthz"
 curl -sS "${GATEWAY_URL}/healthz" | jq .
 
 echo "[2/5] Ingest risk event"
 INGEST_RESP="$(curl -sS -X POST "${GATEWAY_URL}/api/v1/risk/events/ingest" \
+  -H "X-API-Key: ${API_KEY}" \
   -H "X-Idempotency-Key: demo-risk-001" \
   -H "Content-Type: application/json" \
   -d '{
@@ -24,12 +26,23 @@ echo "${INGEST_RESP}" | jq .
 CASE_ID="$(echo "${INGEST_RESP}" | jq -r '.case_id')"
 
 echo "[3/5] Query risk case ${CASE_ID}"
-curl -sS "${GATEWAY_URL}/api/v1/risk/cases/${CASE_ID}" | jq .
+curl -sS "${GATEWAY_URL}/api/v1/risk/cases/${CASE_ID}" \
+  -H "X-API-Key: ${API_KEY}" | jq .
 
 echo "[4/5] Query ops metrics"
-curl -sS "${GATEWAY_URL}/api/v1/risk/ops/metrics" | jq .
+curl -sS "${GATEWAY_URL}/api/v1/risk/ops/metrics" \
+  -H "X-API-Key: ${API_KEY}" | jq .
 
-echo "[5/5] Copilot summary"
+echo "[5/6] Query audit logs"
+curl -sS "${GATEWAY_URL}/api/v1/risk/cases/${CASE_ID}/audit-logs" \
+  -H "X-API-Key: ${API_KEY}" | jq .
+
+echo "[6/6] Query Prometheus metrics"
+curl -sS "${GATEWAY_URL}/metrics" \
+  -H "X-API-Key: ${API_KEY}"
+
+echo
+echo "[extra] Copilot summary"
 curl -sS -X POST "${COPILOT_URL}/copilot/risk/summary" \
   -H "Content-Type: application/json" \
   -d "{

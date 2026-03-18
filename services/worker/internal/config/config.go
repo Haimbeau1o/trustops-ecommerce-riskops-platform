@@ -8,19 +8,23 @@ import (
 
 // Config contains worker runtime configuration from environment.
 type Config struct {
-	Name          string
-	RabbitMQURL   string
-	RabbitMQQueue string
-	Prefetch      int
+	Name           string
+	RabbitMQURL    string
+	RabbitMQQueue  string
+	Prefetch       int
+	StorageBackend string
+	MySQLDSN       string
 }
 
 // Load parses worker config with defaults suitable for local docker compose.
 func Load() Config {
 	return Config{
-		Name:          envOrDefault("WORKER_NAME", "riskops-worker"),
-		RabbitMQURL:   envOrDefault("WORKER_RABBITMQ_URL", "amqp://trustops:trustops@rabbitmq:5672/"),
-		RabbitMQQueue: envOrDefault("WORKER_RABBITMQ_QUEUE", "risk.case.ingested"),
-		Prefetch:      envIntOrDefault("WORKER_PREFETCH", 10),
+		Name:           envOrDefault("WORKER_NAME", "riskops-worker"),
+		RabbitMQURL:    envOrDefault("WORKER_RABBITMQ_URL", "amqp://trustops:trustops@rabbitmq:5672/"),
+		RabbitMQQueue:  envOrDefault("WORKER_RABBITMQ_QUEUE", "risk.case.ingested"),
+		Prefetch:       envIntOrDefault("WORKER_PREFETCH", 10),
+		StorageBackend: strings.ToLower(envOrDefault("WORKER_STORAGE_BACKEND", "memory")),
+		MySQLDSN:       envOrDefault("WORKER_MYSQL_DSN", "trustops:trustops@tcp(mysql:3306)/trustops?parseTime=true"),
 	}
 }
 
