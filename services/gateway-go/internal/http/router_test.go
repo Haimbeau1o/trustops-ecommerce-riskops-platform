@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +14,15 @@ import (
 )
 
 type fakeRepository struct {
-	cases   map[string]storage.Case
-	creates int
+	cases          map[string]storage.Case
+	creates        int
+	ingests        int
+	lastIngest     storage.IngestInput
+	lastReplay     bool
+	replayByKey    map[string]storage.IngestResult
+	metrics        storage.OpsMetrics
+	pendingOutbox  []storage.OutboxItem
+	outboxFailures map[int64]int
 }
 
 func (f *fakeRepository) CreateCase(_ context.Context, c storage.Case) error {
@@ -34,6 +40,42 @@ func (f *fakeRepository) GetCase(_ context.Context, caseID string) (storage.Case
 		return storage.Case{}, storage.ErrCaseNotFound
 	}
 	return c, nil
+}
+
+func (f *fakeRepository) IngestCase(_ context.Context, input storage.IngestInput) (storage.IngestResult, error) {
+	f.ingests++
+	f.lastIngest = input
+	if f.replayByKey != nil {
+		if replay, ok := f.replayByKey[input.IdempotencyKey]; ok {
+			f.lastReplay = true
+			return replay, nil
+		}
+	}
+	return storage.IngestResult{
+		Case:             input.Case,
+		IdempotentReplay: false,
+		ReplayCount:      0,
+	}, nil
+}
+
+func (f *fakeRepository) GetOpsMetrics(_ context.Context) (storage.OpsMetrics, error) {
+	return f.metrics, nil
+}
+
+func (f *fakeRepository) ListPendingOutbox(_ context.Context, _ time.Time, _ int) ([]storage.OutboxItem, error) {
+	return f.pendingOutbox, nil
+}
+
+func (f *fakeRepository) MarkOutboxPublished(_ context.Context, _ int64) error {
+	return nil
+}
+
+func (f *fakeRepository) MarkOutboxFailed(_ context.Context, item storage.OutboxItem, _ string, _ time.Time, _ int) (bool, error) {
+	if f.outboxFailures == nil {
+		f.outboxFailures = map[int64]int{}
+	}
+	f.outboxFailures[item.ID]++
+	return false, nil
 }
 
 type fakePublisher struct {
@@ -70,10 +112,8 @@ func TestHealthzRoute(t *testing.T) {
 
 func TestIngestRiskEventRoute(t *testing.T) {
 	repo := &fakeRepository{}
-	publisher := &fakePublisher{}
 	app := NewRouter(Dependencies{
 		Repository: repo,
-		Publisher:  publisher,
 		IDGenerator: func() string {
 			return "case-risk-001"
 		},
@@ -109,14 +149,11 @@ func TestIngestRiskEventRoute(t *testing.T) {
 	if body["case_id"] != "case-risk-001" {
 		t.Fatalf("expected case_id=case-risk-001, got %#v", body["case_id"])
 	}
-	if repo.creates != 1 {
-		t.Fatalf("expected create to be called once, got %d", repo.creates)
+	if repo.ingests != 1 {
+		t.Fatalf("expected ingest to be called once, got %d", repo.ingests)
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("expected one event to be published, got %d", len(publisher.events))
-	}
-	if publisher.events[0].CaseID != "case-risk-001" {
-		t.Fatalf("unexpected published event: %#v", publisher.events[0])
+	if body["idempotent_replay"] != false {
+		t.Fatalf("expected idempotent_replay=false, got %#v", body["idempotent_replay"])
 	}
 }
 
@@ -167,12 +204,10 @@ func TestGetRiskCaseRouteNotFound(t *testing.T) {
 	}
 }
 
-func TestIngestRiskEventRoutePublisherError(t *testing.T) {
+func TestIngestRiskEventRouteIdempotencyHeader(t *testing.T) {
+	repo := &fakeRepository{}
 	app := NewRouter(Dependencies{
-		Repository: &fakeRepository{},
-		Publisher: &fakePublisher{
-			err: errors.New("publish failed"),
-		},
+		Repository: repo,
 	})
 	payload := `{
 		"merchant_id":"merchant-1001",
@@ -186,9 +221,89 @@ func TestIngestRiskEventRoutePublisherError(t *testing.T) {
 		"POST",
 		"/api/v1/risk/events/ingest",
 		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "X-Idempotency-Key", Value: "idem-manual-key"},
 		ut.Header{Key: "Content-Type", Value: "application/json"},
 	)
 	if resp.Code != 202 {
 		t.Fatalf("expected status 202, got %d", resp.Code)
+	}
+	if repo.lastIngest.IdempotencyKey != "idem-manual-key" {
+		t.Fatalf("expected explicit idempotency key to be used, got %q", repo.lastIngest.IdempotencyKey)
+	}
+}
+
+func TestIngestRiskEventRouteIdempotentReplay(t *testing.T) {
+	repo := &fakeRepository{
+		replayByKey: map[string]storage.IngestResult{
+			"idem-replay": {
+				Case: storage.Case{
+					CaseID:      "case-existing-001",
+					MerchantID:  "merchant-1001",
+					RiskScore:   0.91,
+					CaseStatus:  "pending_review",
+					EventType:   "abnormal_listing_activity",
+					OccurredAtMs: 1_710_000_000_000,
+				},
+				IdempotentReplay: true,
+				ReplayCount:      2,
+			},
+		},
+	}
+	app := NewRouter(Dependencies{
+		Repository: repo,
+		IDGenerator: func() string {
+			return "case-risk-new-ignored"
+		},
+		Clock: func() time.Time {
+			return time.UnixMilli(1_710_000_000_000)
+		},
+	})
+
+	payload := `{
+		"merchant_id":"merchant-1001",
+		"event_type":"abnormal_listing_activity",
+		"evidence":["sku_spike","ip_anomaly"],
+		"risk_score":0.87
+	}`
+
+	resp := ut.PerformRequest(
+		app.Engine,
+		"POST",
+		"/api/v1/risk/events/ingest",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "X-Idempotency-Key", Value: "idem-replay"},
+		ut.Header{Key: "Content-Type", Value: "application/json"},
+	)
+	if resp.Code != 202 {
+		t.Fatalf("expected status 202, got %d", resp.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to parse body: %v", err)
+	}
+	if body["idempotent_replay"] != true {
+		t.Fatalf("expected idempotent_replay=true, got %#v", body["idempotent_replay"])
+	}
+	if body["case_id"] != "case-existing-001" {
+		t.Fatalf("expected replayed case_id, got %#v", body["case_id"])
+	}
+}
+
+func TestGetOpsMetricsRoute(t *testing.T) {
+	app := NewRouter(Dependencies{
+		Repository: &fakeRepository{
+			metrics: storage.OpsMetrics{
+				TotalIngests:         12,
+				IdempotentReplays:    3,
+				PendingOutboxEvents:  5,
+				DeadLetterOutboxRows: 1,
+			},
+		},
+	})
+
+	resp := ut.PerformRequest(app.Engine, "GET", "/api/v1/risk/ops/metrics", nil)
+	if resp.Code != 200 {
+		t.Fatalf("expected status 200, got %d", resp.Code)
 	}
 }

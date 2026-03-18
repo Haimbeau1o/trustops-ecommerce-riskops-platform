@@ -89,18 +89,21 @@ trustops-ecommerce-riskops-platform/
 
 ## 当前状态
 
-当前为 phase-2 运行时骨架（可演示后端平台主链路）：
+当前为 phase-3 运行时骨架（可演示后端平台主链路）：
 - Go Hertz gateway（env 驱动配置）
   - `GET /healthz`
   - `POST /api/v1/risk/events/ingest`
   - `GET /api/v1/risk/cases/:case_id`
+  - `GET /api/v1/risk/ops/metrics`
 - 风险案例仓储抽象
   - `MySQL` 持久化
   - `Redis` 案件查询缓存
   - `In-memory` 测试/兜底实现
-- 异步事件
-  - ingest 后发布 lightweight case event 到 `RabbitMQ`
-  - `services/worker` 消费队列并执行消息处理
+- phase-3 可靠性能力
+  - ingest 幂等：优先使用 `X-Idempotency-Key`，缺省时回退到稳定请求指纹
+  - 事务 outbox：案件、幂等记录、outbox、审计日志一次事务写入
+  - outbox relay：Gateway 后台轮询待投递事件，失败进入 retry / dead-letter 状态
+  - ops metrics：可直接查看 ingest、replay、pending outbox、dead-letter 聚合指标
 - Python FastAPI copilot（AI 增强，不替代主流程）
   - `GET /healthz`
   - `POST /copilot/risk/summary`
@@ -170,6 +173,7 @@ curl http://127.0.0.1:8080/healthz
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/risk/events/ingest \
+  -H "X-Idempotency-Key: demo-risk-001" \
   -H "Content-Type: application/json" \
   -d '{"merchant_id":"merchant-1001","event_type":"abnormal_listing_activity","evidence":["sku_spike","ip_anomaly"],"risk_score":0.87}'
 ```
@@ -178,6 +182,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/risk/events/ingest \
 
 ```bash
 curl http://127.0.0.1:8080/api/v1/risk/cases/case-risk-001
+```
+
+运营指标查询：
+
+```bash
+curl http://127.0.0.1:8080/api/v1/risk/ops/metrics
 ```
 
 Copilot 风险摘要：
@@ -193,6 +203,13 @@ curl -X POST http://127.0.0.1:8000/copilot/risk/summary \
 ```bash
 ./scripts/sample_requests.sh
 ```
+
+## Phase 3 亮点
+
+- 幂等入口：重复请求不会重复建案，适合“网络抖动 + 客户端重试”的真实场景。
+- 可靠异步：案件主数据与 outbox 事件同事务提交，避免“库里有数据但队列没消息”。
+- 可运维：通过 metrics 可直接演示 pending / dead-letter 状态，方便面试时讲稳定性治理。
+- AI 边界清晰：Copilot 只做摘要和建议，不进入主判定链路。
 
 ## 依赖说明
 

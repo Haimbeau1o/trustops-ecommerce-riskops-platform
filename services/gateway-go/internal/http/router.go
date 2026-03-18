@@ -2,16 +2,18 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/utils"
 
-	"trustops-ecommerce-riskops-platform/services/gateway-go/internal/mq"
 	"trustops-ecommerce-riskops-platform/services/gateway-go/internal/storage"
 )
 
@@ -27,7 +29,6 @@ type ingestRiskEventRequest struct {
 // Dependencies are injectable runtime components for the router.
 type Dependencies struct {
 	Repository  storage.Repository
-	Publisher   mq.Publisher
 	IDGenerator func() string
 	Clock       func() time.Time
 }
@@ -80,28 +81,22 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 			CreatedAt:     now.UTC(),
 		}
 		ctx := context.Background()
-		if err := resolved.Repository.CreateCase(ctx, riskCase); err != nil {
+		result, err := resolved.Repository.IngestCase(ctx, storage.IngestInput{
+			IdempotencyKey: resolveIdempotencyKey(c, req),
+			Case:           riskCase,
+		})
+		if err != nil {
 			c.JSON(500, utils.H{"error": "case_persist_failed"})
 			return
 		}
 
-		eventPublished := true
-		if err := resolved.Publisher.PublishCaseIngested(ctx, mq.CaseIngestedEvent{
-			CaseID:       caseID,
-			MerchantID:   req.MerchantID,
-			EventType:    req.EventType,
-			RiskScore:    req.RiskScore,
-			OccurredAtMs: occurredAtMs,
-		}); err != nil {
-			eventPublished = false
-		}
-
 		c.JSON(202, utils.H{
-			"accepted":        true,
-			"case_id":         caseID,
-			"risk_score":      req.RiskScore,
-			"merchant_id":     req.MerchantID,
-			"event_published": eventPublished,
+			"accepted":          true,
+			"case_id":           result.Case.CaseID,
+			"risk_score":        result.Case.RiskScore,
+			"merchant_id":       result.Case.MerchantID,
+			"idempotent_replay": result.IdempotentReplay,
+			"async_status":      "queued_in_outbox",
 		})
 	})
 
@@ -136,15 +131,21 @@ func NewRouterWithHostPort(hostPort string, deps Dependencies) *server.Hertz {
 		})
 	})
 
+	h.GET("/api/v1/risk/ops/metrics", func(_ context.Context, c *app.RequestContext) {
+		metrics, err := resolved.Repository.GetOpsMetrics(context.Background())
+		if err != nil {
+			c.JSON(500, utils.H{"error": "ops_metrics_unavailable"})
+			return
+		}
+		c.JSON(200, metrics)
+	})
+
 	return h
 }
 
 func resolveDependencies(deps Dependencies) Dependencies {
 	if deps.Repository == nil {
 		deps.Repository = storage.NewInMemoryRepository()
-	}
-	if deps.Publisher == nil {
-		deps.Publisher = mq.NewNoopPublisher()
 	}
 	if deps.IDGenerator == nil {
 		deps.IDGenerator = func() string {
@@ -157,4 +158,28 @@ func resolveDependencies(deps Dependencies) Dependencies {
 		}
 	}
 	return deps
+}
+
+func resolveIdempotencyKey(c *app.RequestContext, req ingestRiskEventRequest) string {
+	if headerKey := strings.TrimSpace(string(c.Request.Header.Peek("X-Idempotency-Key"))); headerKey != "" {
+		return headerKey
+	}
+
+	payload, _ := json.Marshal(struct {
+		MerchantID   string   `json:"merchant_id"`
+		EventType    string   `json:"event_type"`
+		Evidence     []string `json:"evidence"`
+		RiskScore    float64  `json:"risk_score"`
+		TriggeredBy  string   `json:"triggered_by,omitempty"`
+		OccurredAtMs int64    `json:"occurred_at_ms,omitempty"`
+	}{
+		MerchantID:   req.MerchantID,
+		EventType:    req.EventType,
+		Evidence:     req.Evidence,
+		RiskScore:    req.RiskScore,
+		TriggeredBy:  req.TriggeredBy,
+		OccurredAtMs: req.OccurredAtMs,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }

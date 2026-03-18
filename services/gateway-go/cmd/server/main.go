@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"time"
 
@@ -43,6 +44,11 @@ var newRabbitMQPublisher = func(url, queue string) (mq.Publisher, error) {
 	return mq.NewRabbitMQPublisher(url, queue)
 }
 
+const (
+	outboxRelayBatchSize  = 20
+	outboxRelayMaxRetries = 3
+)
+
 func main() {
 	cfg := config.Load()
 	repo, err := buildRepository(cfg)
@@ -56,8 +62,8 @@ func main() {
 
 	app := gatewayhttp.NewRouterWithHostPort(cfg.HostPort(), gatewayhttp.Dependencies{
 		Repository: repo,
-		Publisher:  publisher,
 	})
+	startOutboxRelay(repo, publisher)
 	log.Printf("gateway-go listening on %s with storage=%s mq=%s", cfg.HostPort(), cfg.StorageBackend, cfg.MQBackend)
 	app.Spin()
 }
@@ -101,4 +107,50 @@ func buildPublisher(cfg config.Config) (mq.Publisher, error) {
 		return nil, err
 	}
 	return publisher, nil
+}
+
+func startOutboxRelay(repo storage.Repository, publisher mq.Publisher) {
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := flushOutbox(flushCtx, repo, publisher, time.Now().UTC()); err != nil {
+				log.Printf("outbox relay flush failed: %v", err)
+			}
+			cancel()
+			<-ticker.C
+		}
+	}()
+}
+
+func flushOutbox(ctx context.Context, repo storage.Repository, publisher mq.Publisher, now time.Time) error {
+	items, err := repo.ListPendingOutbox(ctx, now, outboxRelayBatchSize)
+	if err != nil {
+		return err
+	}
+
+	for _, item := range items {
+		var event mq.CaseIngestedEvent
+		if err := json.Unmarshal(item.Payload, &event); err != nil {
+			if _, markErr := repo.MarkOutboxFailed(ctx, item, "invalid_outbox_payload", now, 1); markErr != nil {
+				return markErr
+			}
+			continue
+		}
+
+		if err := publisher.PublishCaseIngested(ctx, event); err != nil {
+			nextAttemptAt := now.Add(time.Duration(item.PublishAttempts+1) * 5 * time.Second)
+			if _, markErr := repo.MarkOutboxFailed(ctx, item, err.Error(), nextAttemptAt, outboxRelayMaxRetries); markErr != nil {
+				return markErr
+			}
+			continue
+		}
+
+		if err := repo.MarkOutboxPublished(ctx, item.ID); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

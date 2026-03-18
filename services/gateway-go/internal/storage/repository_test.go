@@ -48,6 +48,29 @@ func (f *fakeBaseRepo) GetCase(_ context.Context, caseID string) (Case, error) {
 	return c, nil
 }
 
+func (f *fakeBaseRepo) IngestCase(_ context.Context, input IngestInput) (IngestResult, error) {
+	if err := f.CreateCase(context.Background(), input.Case); err != nil {
+		return IngestResult{}, err
+	}
+	return IngestResult{Case: input.Case}, nil
+}
+
+func (f *fakeBaseRepo) GetOpsMetrics(_ context.Context) (OpsMetrics, error) {
+	return OpsMetrics{}, nil
+}
+
+func (f *fakeBaseRepo) ListPendingOutbox(_ context.Context, _ time.Time, _ int) ([]OutboxItem, error) {
+	return nil, nil
+}
+
+func (f *fakeBaseRepo) MarkOutboxPublished(_ context.Context, _ int64) error {
+	return nil
+}
+
+func (f *fakeBaseRepo) MarkOutboxFailed(_ context.Context, _ OutboxItem, _ string, _ time.Time, _ int) (bool, error) {
+	return false, nil
+}
+
 func TestInMemoryRepositoryCreateAndGetCase(t *testing.T) {
 	repo := NewInMemoryRepository()
 	input := Case{
@@ -187,5 +210,101 @@ func TestInMemoryRepositoryCaseNotFound(t *testing.T) {
 	_, err := repo.GetCase(context.Background(), "unknown")
 	if !errors.Is(err, ErrCaseNotFound) {
 		t.Fatalf("expected ErrCaseNotFound, got %v", err)
+	}
+}
+
+func TestInMemoryRepositoryIngestCaseDeduplicatesByIdempotencyKey(t *testing.T) {
+	repo := NewInMemoryRepository()
+	ctx := context.Background()
+	input := IngestInput{
+		IdempotencyKey: "idem-risk-001",
+		Case: Case{
+			CaseID:        "case-risk-001",
+			MerchantID:    "merchant-1001",
+			EventType:     "abnormal_listing_activity",
+			RiskCategory:  "listing_fraud",
+			CaseStatus:    "pending_review",
+			EvidenceItems: []string{"sku_spike", "ip_anomaly"},
+			RiskScore:     0.87,
+			OccurredAtMs:  1_710_000_000_000,
+		},
+	}
+
+	first, err := repo.IngestCase(ctx, input)
+	if err != nil {
+		t.Fatalf("first IngestCase() error = %v", err)
+	}
+	second, err := repo.IngestCase(ctx, input)
+	if err != nil {
+		t.Fatalf("second IngestCase() error = %v", err)
+	}
+
+	if first.IdempotentReplay {
+		t.Fatalf("expected first ingest not to be replay")
+	}
+	if !second.IdempotentReplay {
+		t.Fatalf("expected second ingest to be replay")
+	}
+	if second.Case.CaseID != first.Case.CaseID {
+		t.Fatalf("expected replay to reuse case ID")
+	}
+
+	metrics, err := repo.GetOpsMetrics(ctx)
+	if err != nil {
+		t.Fatalf("GetOpsMetrics() error = %v", err)
+	}
+	if metrics.TotalIngests != 1 {
+		t.Fatalf("expected 1 unique ingest, got %d", metrics.TotalIngests)
+	}
+	if metrics.IdempotentReplays != 1 {
+		t.Fatalf("expected 1 replay, got %d", metrics.IdempotentReplays)
+	}
+	if metrics.PendingOutboxEvents != 1 {
+		t.Fatalf("expected 1 pending outbox row, got %d", metrics.PendingOutboxEvents)
+	}
+}
+
+func TestInMemoryRepositoryMarksOutboxDeadLetterAfterFailures(t *testing.T) {
+	repo := NewInMemoryRepository()
+	ctx := context.Background()
+	_, err := repo.IngestCase(ctx, IngestInput{
+		IdempotencyKey: "idem-risk-dead",
+		Case: Case{
+			CaseID:        "case-risk-dead",
+			MerchantID:    "merchant-1001",
+			EventType:     "listing_fraud",
+			RiskCategory:  "listing_fraud",
+			CaseStatus:    "pending_review",
+			EvidenceItems: []string{"velocity_anomaly"},
+			RiskScore:     0.93,
+			OccurredAtMs:  1_710_000_100_000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("IngestCase() error = %v", err)
+	}
+
+	items, err := repo.ListPendingOutbox(ctx, time.Now().UTC(), 10)
+	if err != nil {
+		t.Fatalf("ListPendingOutbox() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 pending outbox item, got %d", len(items))
+	}
+
+	dead, err := repo.MarkOutboxFailed(ctx, items[0], "publish failed", time.Now().UTC().Add(time.Minute), 1)
+	if err != nil {
+		t.Fatalf("MarkOutboxFailed() error = %v", err)
+	}
+	if !dead {
+		t.Fatalf("expected outbox item to be dead-lettered")
+	}
+
+	metrics, err := repo.GetOpsMetrics(ctx)
+	if err != nil {
+		t.Fatalf("GetOpsMetrics() error = %v", err)
+	}
+	if metrics.DeadLetterOutboxRows != 1 {
+		t.Fatalf("expected 1 dead-letter row, got %d", metrics.DeadLetterOutboxRows)
 	}
 }
