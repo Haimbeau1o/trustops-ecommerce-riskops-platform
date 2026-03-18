@@ -100,7 +100,7 @@ trustops-ecommerce-riskops-platform/
 
 ```bash
 cd services/gateway-go && go test ./...
-cd ../ai-copilot && python3 -m pytest -q
+cd ../ai-copilot && python3 -m pip install --user -r requirements-dev.txt && python3 -m pytest -q
 ```
 
 ### 2) 单独启动服务
