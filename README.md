@@ -1,0 +1,92 @@
+# TrustOps Ecommerce RiskOps Platform
+
+面向字节电商安全场景的后端平台项目骨架。项目主线是风险治理后端工程，AI 能力作为增强模块接入，不替代规则与流程主链路。
+
+## 项目定位
+
+本仓库用于展示「后端开发工程师-电商安全」方向的工程化能力，聚焦：
+- 风险事件接入
+- 规则判定与证据链
+- 运营案件流转与审计留痕
+- 中间件与稳定性治理
+- AI Copilot 辅助排查
+
+核心表达是：这不是算法实验仓库，而是一个可服务化、可扩展、可运维的后端平台骨架。
+
+## JD 来源说明
+
+本仓库内容源自 `jd-to-offer` 工作区的目标 JD 分析结果，并做了仓库化整理与工程化重排。
+
+- 来源 JD 文件：
+  - `/Volumes/passport/简历/滴滴/.worktrees/trustops-expansion/examples/bytedance_2026_ecom_security_backend_jd.md`
+- 来源 case 输出：
+  - `/Volumes/passport/简历/滴滴/.worktrees/trustops-expansion/cases/bytedance-ecom-security-2026/`
+
+详细内容见 [docs/jd-source.md](docs/jd-source.md)。
+
+## 关键技能点 / 知识点
+
+本仓库重点覆盖以下能力：
+- 后端服务工程：分层架构、接口契约、幂等与重试
+- 业务抽象能力：风险事件、规则、案件状态机的领域建模
+- 中间件能力：MySQL、Redis、RabbitMQ 的协同使用
+- 稳定性与安全：审计日志、可追踪链路、失败补偿
+- AI 工程化：作为 Copilot 增强能力接入主流程
+
+详细知识树见 [docs/knowledge-points.md](docs/knowledge-points.md)。
+
+## 架构总览
+
+推荐技术栈：
+- `Go + Hertz`：主 API 层与风险流程编排
+- `Python + FastAPI`：AI Copilot sidecar
+- `MySQL + Redis + RabbitMQ`：存储、缓存、异步任务
+- `Prometheus / Grafana`：监控与观测
+
+主链路：
+1. `risk ingestion` 接收商家/交易/行为事件
+2. `rule engine` 执行命中与评分
+3. `case workflow` 生成并流转运营案件
+4. `operations data APIs` 提供查询与追踪
+5. `ai copilot` 输出摘要、解释与排查建议
+
+详细蓝图见 [docs/project-blueprint.md](docs/project-blueprint.md)。
+
+## 模块拆分
+
+- `services/gateway-go`：网关、鉴权、限流、路由、核心业务接口
+- `services/worker`：异步任务、重试、回放、补偿
+- `services/ai-copilot`：AI 增强服务（摘要、相似案例、排查建议）
+- `infra`：部署、观测、配置模板
+- `scripts`：本地开发与验证脚本
+- `docs`：JD、知识体系、项目蓝图、面试表达
+
+## 里程碑路线图
+
+1. 第 1 周：完成领域模型、基础 API 骨架、案件状态机草案
+2. 第 2 周：打通事件接入 -> 规则命中 -> 案件流转
+3. 第 3 周：接入 Redis / RabbitMQ，补齐重试、幂等、审计链路
+4. 第 4 周：接入 AI Copilot、压测与观测面板
+
+## 目录结构
+
+```text
+trustops-ecommerce-riskops-platform/
+├── README.md
+├── .gitignore
+├── docs/
+│   ├── jd-source.md
+│   ├── knowledge-points.md
+│   ├── project-blueprint.md
+│   └── interview-assets.md
+├── services/
+│   ├── gateway-go/
+│   ├── ai-copilot/
+│   └── worker/
+├── infra/
+└── scripts/
+```
+
+## 当前状态
+
+当前为本地内容骨架版本（不含远程仓库配置和业务代码实现），用于后续逐步落地服务代码与演示链路。
